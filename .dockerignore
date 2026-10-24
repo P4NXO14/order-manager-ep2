@@ -1,0 +1,16 @@
+target/
+.git/
+.github/
+.vscode/
+.idea/
+.settings/
+docs/
+*.log
+*.iml
+.env
+.env.*
+README.md
+docker-compose*.yml
+sonar-project.properties
+.DS_Store
+Thumbs.db

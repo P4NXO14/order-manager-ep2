@@ -1,0 +1,51 @@
+name: Diagnostico SonarQube
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostico:
+    name: Verificar conexion SonarQube
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verificar token y conexion
+        shell: bash
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::SONAR_TOKEN no esta disponible"
+            exit 1
+          fi
+
+          echo "SONAR_TOKEN esta configurado"
+
+          respuesta=$(curl --silent --show-error --max-time 30 \
+            -H "Authorization: Bearer ${SONAR_TOKEN}" \
+            https://sonarcloud.io/api/authentication/validate)
+
+          echo "Validacion de autenticacion: $respuesta"
+
+          if ! echo "$respuesta" | grep -Eq '"valid"[[:space:]]*:[[:space:]]*true'; then
+            echo "::error::La autenticacion fue rechazada"
+            exit 1
+          fi
+
+          codigo=$(curl --silent --show-error --max-time 30 \
+            --output /dev/null \
+            --write-out "%{http_code}" \
+            -H "Authorization: Bearer ${SONAR_TOKEN}" \
+            https://api.sonarcloud.io/analysis/engine)
+
+          echo "Respuesta del servidor de analisis: HTTP $codigo"
+
+          if [ "$codigo" != "200" ]; then
+            echo "::error::El servidor de analisis rechazo la solicitud"
+            exit 1
+          fi
+
+          echo "Conexion con SonarQube verificada"

@@ -34,6 +34,24 @@ jobs:
       - name: Verificar reporte JaCoCo
         run: test -f target/site/jacoco/jacoco.xml
 
+      - name: Configurar Java 21 para SonarQube
+        if: github.event_name != 'pull_request'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Verificar secreto SonarQube
+        if: github.event_name != 'pull_request'
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::SONAR_TOKEN no esta configurado"
+            exit 1
+          fi
+
       - name: Analizar SonarQube y validar Quality Gate
         if: github.event_name != 'pull_request'
         env:
@@ -42,6 +60,7 @@ jobs:
         run: >
           mvn -B -ntp
           org.sonarsource.scanner.maven:sonar-maven-plugin:5.8.0.7211:sonar
+          -Dsonar.scanner.skipJreProvisioning=true
           -Dsonar.qualitygate.wait=true
           -Dsonar.qualitygate.timeout=300
 

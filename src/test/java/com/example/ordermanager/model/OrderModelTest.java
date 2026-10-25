@@ -1,4 +1,3 @@
-
 package com.example.ordermanager.model;
 
 import java.math.BigDecimal;

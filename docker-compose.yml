@@ -42,8 +42,94 @@ services:
     networks:
       - order_network
 
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      app:
+        condition: service_healthy
+      ci-metrics:
+        condition: service_started
+    networks:
+      - order_network
+
+  grafana:
+    image: grafana/grafana:12.3.4
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?Configura GRAFANA_ADMIN_USER en .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Configura GRAFANA_ADMIN_PASSWORD en .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - order_network
+
+  loki:
+    image: grafana/loki:3.5.0
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki.yml
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+    networks:
+      - order_network
+
+  alloy:
+    image: grafana/alloy:v1.9.0
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    ports:
+      - "127.0.0.1:12345:12345"
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    networks:
+      - order_network
+
+  ci-metrics:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    command: ["python", "/metrics/servidor_metricas.py"]
+    environment:
+      GITHUB_METRICS_TOKEN: ${GITHUB_METRICS_TOKEN:-}
+    ports:
+      - "127.0.0.1:9101:9101"
+    volumes:
+      - ./monitoring/ci:/metrics
+      - ./monitoring/ci/servidor_metricas.py:/metrics/servidor_metricas.py:ro
+      - ./monitoring/ci/actualizar_metricas.py:/metrics/actualizar_metricas.py:ro
+      - ./monitoring/ci/exportar_metricas.py:/metrics/exportar_metricas.py:ro
+    networks:
+      - order_network
+
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  alloy_data:
 
 networks:
   order_network:

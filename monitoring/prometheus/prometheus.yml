@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'order-manager'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['app:8098']
+
+  - job_name: 'pipeline-ci'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['ci-metrics:9101']

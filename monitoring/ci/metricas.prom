@@ -1,0 +1,8 @@
+# TYPE ci_coverage_instructions_percent gauge
+ci_coverage_instructions_percent 93.22
+# TYPE ci_coverage_branches_percent gauge
+ci_coverage_branches_percent 98.15
+# TYPE ci_coverage_lines_percent gauge
+ci_coverage_lines_percent 93.72
+# TYPE ci_deployment_duration_seconds gauge
+ci_deployment_duration_seconds 20

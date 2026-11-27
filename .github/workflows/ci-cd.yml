@@ -2,9 +2,9 @@ name: OrderManager CI-CD
 
 on:
   push:
-    branches: [main]
+    branches: [main, evaluacion-3]
   pull_request:
-    branches: [main]
+    branches: [main, evaluacion-3]
   workflow_dispatch:
 
 permissions:
@@ -15,11 +15,51 @@ jobs:
     name: Pruebas cobertura y SonarQube
     runs-on: ubuntu-latest
 
+    outputs:
+      instrucciones: ${{ steps.cobertura.outputs.instrucciones }}
+      ramas: ${{ steps.cobertura.outputs.ramas }}
+      lineas: ${{ steps.cobertura.outputs.lineas }}
+
     steps:
       - name: Clonar repositorio
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Ejecutar auditoria de cumplimiento
+        id: auditoria
+        shell: bash
+        run: |
+          umask 077
+          trap 'rm -f .env' EXIT
+
+          printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" > .env
+          printf 'GRAFANA_ADMIN_USER=admin\n' >> .env
+          printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+
+          REPORTE="$RUNNER_TEMP/reporte-cumplimiento.txt"
+
+          printf 'AUDITORIA DE CUMPLIMIENTO - ORDER MANAGER\n' > "$REPORTE"
+          printf 'Commit: %s\n' "$GITHUB_SHA" >> "$REPORTE"
+          printf 'Ejecucion: %s\n' "$GITHUB_RUN_ID" >> "$REPORTE"
+          printf 'Referencia: %s\n' "$GITHUB_REF" >> "$REPORTE"
+          printf 'Fecha UTC: %s\n\n' "$(date -u +%FT%TZ)" >> "$REPORTE"
+
+          if python3 monitoring/ci/auditar_cumplimiento.py >> "$REPORTE" 2>&1; then
+            cat "$REPORTE"
+          else
+            cat "$REPORTE"
+            echo "::error::Incumplimiento de politicas de seguridad"
+            exit 1
+          fi
+
+      - name: Publicar reporte de cumplimiento
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-cumplimiento
+          path: ${{ runner.temp }}/reporte-cumplimiento.txt
+          if-no-files-found: warn
 
       - name: Configurar Java 17
         uses: actions/setup-java@v4
@@ -34,8 +74,35 @@ jobs:
       - name: Verificar reporte JaCoCo
         run: test -f target/site/jacoco/jacoco.xml
 
+      - name: Exportar metricas de cobertura
+        id: cobertura
+        run: |
+          python3 monitoring/ci/exportar_metricas.py \
+            target/site/jacoco/jacoco.xml \
+            monitoring/ci/metricas.prom
+
+          INSTRUCCIONES=$(awk '$1=="ci_coverage_instructions_percent" {print $2}' monitoring/ci/metricas.prom)
+          RAMAS=$(awk '$1=="ci_coverage_branches_percent" {print $2}' monitoring/ci/metricas.prom)
+          LINEAS=$(awk '$1=="ci_coverage_lines_percent" {print $2}' monitoring/ci/metricas.prom)
+
+          for VALOR in "$INSTRUCCIONES" "$RAMAS" "$LINEAS"; do
+            if ! [[ "$VALOR" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+              echo "::error::Valor de cobertura invalido"
+              exit 1
+            fi
+          done
+
+          echo "instrucciones=$INSTRUCCIONES" >> "$GITHUB_OUTPUT"
+          echo "ramas=$RAMAS" >> "$GITHUB_OUTPUT"
+          echo "lineas=$LINEAS" >> "$GITHUB_OUTPUT"
+
+      - name: Publicar metricas de cobertura
+        uses: actions/upload-artifact@v4
+        with:
+          name: metricas-cobertura
+          path: monitoring/ci/metricas.prom
+
       - name: Configurar Java 21 para SonarQube
-        if: github.event_name != 'pull_request'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -43,7 +110,6 @@ jobs:
           cache: maven
 
       - name: Verificar secreto SonarQube
-        if: github.event_name != 'pull_request'
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
@@ -53,7 +119,6 @@ jobs:
           fi
 
       - name: Analizar SonarQube y validar Quality Gate
-        if: github.event_name != 'pull_request'
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,12 +142,44 @@ jobs:
   despliegue:
     name: Despliegue simulado con Docker
     needs: pruebas
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/evaluacion-3')
     runs-on: ubuntu-latest
 
     steps:
       - name: Clonar repositorio
         uses: actions/checkout@v4
+
+      - name: Verificar herramientas de validacion
+        run: |
+          command -v curl
+          command -v jq
+
+      - name: Recibir y validar metricas de cobertura
+        env:
+          COBERTURA_INSTRUCCIONES: ${{ needs.pruebas.outputs.instrucciones }}
+          COBERTURA_RAMAS: ${{ needs.pruebas.outputs.ramas }}
+          COBERTURA_LINEAS: ${{ needs.pruebas.outputs.lineas }}
+        run: |
+          for VALOR in "$COBERTURA_INSTRUCCIONES" "$COBERTURA_RAMAS" "$COBERTURA_LINEAS"; do
+            if ! [[ "$VALOR" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+              echo "::error::Valor de cobertura invalido"
+              exit 1
+            fi
+
+            if ! awk -v valor="$VALOR" 'BEGIN {exit !(valor >= 0 && valor <= 100)}'; then
+              echo "::error::Cobertura fuera del rango permitido"
+              exit 1
+            fi
+          done
+
+          printf '# TYPE ci_coverage_instructions_percent gauge\n' > monitoring/ci/metricas.prom
+          printf 'ci_coverage_instructions_percent %s\n' "$COBERTURA_INSTRUCCIONES" >> monitoring/ci/metricas.prom
+
+          printf '# TYPE ci_coverage_branches_percent gauge\n' >> monitoring/ci/metricas.prom
+          printf 'ci_coverage_branches_percent %s\n' "$COBERTURA_RAMAS" >> monitoring/ci/metricas.prom
+
+          printf '# TYPE ci_coverage_lines_percent gauge\n' >> monitoring/ci/metricas.prom
+          printf 'ci_coverage_lines_percent %s\n' "$COBERTURA_LINEAS" >> monitoring/ci/metricas.prom
 
       - name: Construir imagen Docker
         run: docker build -t order-manager:ep2 .
@@ -91,16 +188,140 @@ jobs:
         run: |
           umask 077
           printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" > .env
+          printf 'GRAFANA_ADMIN_USER=admin\n' >> .env
+          printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
 
       - name: Validar Docker Compose
         run: docker compose config --quiet
 
-      - name: Iniciar contenedores
-        run: docker compose up -d --no-build --wait --wait-timeout 180
+      - name: Descargar imagenes de servicios
+        run: docker compose pull db prometheus grafana loki alloy ci-metrics
+
+      - name: Iniciar contenedores y medir despliegue
+        run: |
+          INICIO=$(date +%s)
+
+          docker compose up -d --no-build --wait --wait-timeout 180
+
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/health.json" \
+            http://localhost:8098/actuator/health
+
+          jq -e '.status == "UP"' "$RUNNER_TEMP/health.json"
+
+          FIN=$(date +%s)
+          DURACION=$((FIN-INICIO))
+
+          echo "# TYPE ci_deployment_duration_seconds gauge" >> monitoring/ci/metricas.prom
+          echo "ci_deployment_duration_seconds $DURACION" >> monitoring/ci/metricas.prom
+
+          echo "Tiempo de despliegue: $DURACION segundos"
 
       - name: Comprobar salud de OrderManager
         run: |
-          curl -fsS http://localhost:8098/actuator/health | grep -q '"status":"UP"'
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/health.json" \
+            http://localhost:8098/actuator/health
+
+          jq -e '.status == "UP"' "$RUNNER_TEMP/health.json"
+
+      - name: Comprobar metricas del microservicio
+        run: |
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/actuator.prom" \
+            http://localhost:8098/actuator/prometheus
+
+          grep -q 'jvm_memory_used_bytes' "$RUNNER_TEMP/actuator.prom"
+
+      - name: Comprobar Prometheus
+        run: |
+          curl -fsS --retry 20 --retry-delay 3 --retry-all-errors \
+            http://localhost:9090/-/ready
+
+      - name: Comprobar Grafana
+        run: |
+          curl -fsS --retry 20 --retry-delay 3 --retry-all-errors \
+            http://localhost:3000/api/health
+
+      - name: Comprobar Loki
+        run: |
+          curl -fsS --retry 20 --retry-delay 3 --retry-all-errors \
+            http://localhost:3100/ready
+
+      - name: Comprobar Alloy
+        run: |
+          curl -fsS --retry 20 --retry-delay 3 --retry-all-errors \
+            http://localhost:12345/-/ready
+
+      - name: Comprobar servidor de metricas CI-CD
+        run: |
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/metricas-ci.prom" \
+            http://localhost:9101/metrics
+
+          grep -q '^ci_coverage_instructions_percent ' "$RUNNER_TEMP/metricas-ci.prom"
+          grep -q '^ci_coverage_branches_percent ' "$RUNNER_TEMP/metricas-ci.prom"
+          grep -q '^ci_coverage_lines_percent ' "$RUNNER_TEMP/metricas-ci.prom"
+          grep -q '^ci_deployment_duration_seconds ' "$RUNNER_TEMP/metricas-ci.prom"
+
+          cmp monitoring/ci/metricas.prom "$RUNNER_TEMP/metricas-ci.prom"
+
+          cat "$RUNNER_TEMP/metricas-ci.prom"
+
+      - name: Validar recoleccion de metricas en Prometheus
+        run: |
+          for intento in $(seq 1 20); do
+            if curl -fsSG --max-time 10 \
+              -o "$RUNNER_TEMP/prometheus.json" \
+              --data-urlencode 'query=up{job=~"order-manager|pipeline-ci"}' \
+              http://localhost:9090/api/v1/query; then
+
+              if jq -e '.status == "success" and (.data.result | (map(.metric.job) | sort) == ["order-manager", "pipeline-ci"] and all(.[]; .value[1] == "1"))' \
+                "$RUNNER_TEMP/prometheus.json" > /dev/null; then
+
+                echo "Ambas fuentes de metricas estan disponibles"
+                exit 0
+              fi
+            fi
+
+            sleep 5
+          done
+
+          echo "::error::Prometheus no esta recolectando todas las metricas"
+          exit 1
+
+      - name: Generar advertencia controlada
+        run: |
+          CODIGO=$(curl -s -o /dev/null -w "%{http_code}" \
+            http://localhost:8098/ruta-inexistente)
+
+          if [ "$CODIGO" != "404" ]; then
+            echo "::error::Se esperaba HTTP 404 y se obtuvo $CODIGO"
+            exit 1
+          fi
+
+      - name: Validar recepcion de logs en Loki
+        run: |
+          for intento in $(seq 1 20); do
+            if curl -fsSG --max-time 10 \
+              -o "$RUNNER_TEMP/loki.json" \
+              --data-urlencode 'query={service="order-manager"} |= "Recurso no encontrado"' \
+              --data-urlencode 'limit=10' \
+              http://localhost:3100/loki/api/v1/query_range; then
+
+              if jq -e '.status == "success" and any(.data.result[]?; .stream.service == "order-manager" and any(.values[]?; .[1] | contains("Recurso no encontrado")))' \
+                "$RUNNER_TEMP/loki.json" > /dev/null; then
+
+                echo "Loki recibio correctamente los logs de OrderManager"
+                exit 0
+              fi
+            fi
+
+            sleep 5
+          done
+
+          echo "::error::Loki no recibio los logs esperados"
+          exit 1
 
       - name: Crear pedido de prueba
         run: |
@@ -113,7 +334,25 @@ jobs:
         run: |
           docker compose down
           docker compose up -d --no-build --wait --wait-timeout 180
-          curl -fsS http://localhost:8098/api/orders/1 | grep -q '"customerName":"Cliente CI"'
+
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/pedido.json" \
+            http://localhost:8098/api/orders/1
+
+          jq -e '.customerName == "Cliente CI"' "$RUNNER_TEMP/pedido.json"
+
+      - name: Publicar metricas del pipeline
+        uses: actions/upload-artifact@v4
+        with:
+          name: metricas-pipeline
+          path: monitoring/ci/metricas.prom
+
+      - name: Mostrar resumen de metricas
+        run: |
+          echo "## Metricas del pipeline CI/CD" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat monitoring/ci/metricas.prom >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Mostrar diagnostico de errores
         if: failure()

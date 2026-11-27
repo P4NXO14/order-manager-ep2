@@ -15,6 +15,11 @@ jobs:
     name: Pruebas cobertura y SonarQube
     runs-on: ubuntu-latest
 
+    outputs:
+      instrucciones: ${{ steps.cobertura.outputs.instrucciones }}
+      ramas: ${{ steps.cobertura.outputs.ramas }}
+      lineas: ${{ steps.cobertura.outputs.lineas }}
+
     steps:
       - name: Clonar repositorio
         uses: actions/checkout@v4
@@ -35,10 +40,26 @@ jobs:
         run: test -f target/site/jacoco/jacoco.xml
 
       - name: Exportar metricas de cobertura
+        id: cobertura
         run: |
           python3 monitoring/ci/exportar_metricas.py \
             target/site/jacoco/jacoco.xml \
             monitoring/ci/metricas.prom
+
+          INSTRUCCIONES=$(awk '$1=="ci_coverage_instructions_percent" {print $2}' monitoring/ci/metricas.prom)
+          RAMAS=$(awk '$1=="ci_coverage_branches_percent" {print $2}' monitoring/ci/metricas.prom)
+          LINEAS=$(awk '$1=="ci_coverage_lines_percent" {print $2}' monitoring/ci/metricas.prom)
+
+          for VALOR in "$INSTRUCCIONES" "$RAMAS" "$LINEAS"; do
+            if ! [[ "$VALOR" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+              echo "::error::Valor de cobertura invalido"
+              exit 1
+            fi
+          done
+
+          echo "instrucciones=$INSTRUCCIONES" >> "$GITHUB_OUTPUT"
+          echo "ramas=$RAMAS" >> "$GITHUB_OUTPUT"
+          echo "lineas=$LINEAS" >> "$GITHUB_OUTPUT"
 
       - name: Publicar metricas de cobertura
         uses: actions/upload-artifact@v4
@@ -96,11 +117,32 @@ jobs:
       - name: Clonar repositorio
         uses: actions/checkout@v4
 
-      - name: Descargar metricas de cobertura
-        uses: actions/download-artifact@v4
-        with:
-          name: metricas-cobertura
-          path: monitoring/ci
+      - name: Recibir y validar metricas de cobertura
+        env:
+          COBERTURA_INSTRUCCIONES: ${{ needs.pruebas.outputs.instrucciones }}
+          COBERTURA_RAMAS: ${{ needs.pruebas.outputs.ramas }}
+          COBERTURA_LINEAS: ${{ needs.pruebas.outputs.lineas }}
+        run: |
+          for VALOR in "$COBERTURA_INSTRUCCIONES" "$COBERTURA_RAMAS" "$COBERTURA_LINEAS"; do
+            if ! [[ "$VALOR" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+              echo "::error::Valor de cobertura invalido"
+              exit 1
+            fi
+
+            if ! awk -v valor="$VALOR" 'BEGIN {exit !(valor >= 0 && valor <= 100)}'; then
+              echo "::error::Cobertura fuera del rango permitido"
+              exit 1
+            fi
+          done
+
+          printf '# TYPE ci_coverage_instructions_percent gauge\n' > monitoring/ci/metricas.prom
+          printf 'ci_coverage_instructions_percent %s\n' "$COBERTURA_INSTRUCCIONES" >> monitoring/ci/metricas.prom
+
+          printf '# TYPE ci_coverage_branches_percent gauge\n' >> monitoring/ci/metricas.prom
+          printf 'ci_coverage_branches_percent %s\n' "$COBERTURA_RAMAS" >> monitoring/ci/metricas.prom
+
+          printf '# TYPE ci_coverage_lines_percent gauge\n' >> monitoring/ci/metricas.prom
+          printf 'ci_coverage_lines_percent %s\n' "$COBERTURA_LINEAS" >> monitoring/ci/metricas.prom
 
       - name: Construir imagen Docker
         run: docker build -t order-manager:ep2 .

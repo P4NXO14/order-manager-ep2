@@ -26,6 +26,41 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Ejecutar auditoria de cumplimiento
+        id: auditoria
+        shell: bash
+        run: |
+          umask 077
+          trap 'rm -f .env' EXIT
+
+          printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" > .env
+          printf 'GRAFANA_ADMIN_USER=admin\n' >> .env
+          printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+
+          REPORTE="$RUNNER_TEMP/reporte-cumplimiento.txt"
+
+          printf 'AUDITORIA DE CUMPLIMIENTO - ORDER MANAGER\n' > "$REPORTE"
+          printf 'Commit: %s\n' "$GITHUB_SHA" >> "$REPORTE"
+          printf 'Ejecucion: %s\n' "$GITHUB_RUN_ID" >> "$REPORTE"
+          printf 'Referencia: %s\n' "$GITHUB_REF" >> "$REPORTE"
+          printf 'Fecha UTC: %s\n\n' "$(date -u +%FT%TZ)" >> "$REPORTE"
+
+          if python3 monitoring/ci/auditar_cumplimiento.py >> "$REPORTE" 2>&1; then
+            cat "$REPORTE"
+          else
+            cat "$REPORTE"
+            echo "::error::Incumplimiento de politicas de seguridad"
+            exit 1
+          fi
+
+      - name: Publicar reporte de cumplimiento
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-cumplimiento
+          path: ${{ runner.temp }}/reporte-cumplimiento.txt
+          if-no-files-found: warn
+
       - name: Configurar Java 17
         uses: actions/setup-java@v4
         with:

@@ -103,7 +103,6 @@ jobs:
           path: monitoring/ci/metricas.prom
 
       - name: Configurar Java 21 para SonarQube
-        if: github.event_name != 'pull_request'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -111,7 +110,6 @@ jobs:
           cache: maven
 
       - name: Verificar secreto SonarQube
-        if: github.event_name != 'pull_request'
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
@@ -121,7 +119,6 @@ jobs:
           fi
 
       - name: Analizar SonarQube y validar Quality Gate
-        if: github.event_name != 'pull_request'
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

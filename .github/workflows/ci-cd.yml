@@ -117,6 +117,11 @@ jobs:
       - name: Clonar repositorio
         uses: actions/checkout@v4
 
+      - name: Verificar herramientas de validacion
+        run: |
+          command -v curl
+          command -v jq
+
       - name: Recibir y validar metricas de cobertura
         env:
           COBERTURA_INSTRUCCIONES: ${{ needs.pruebas.outputs.instrucciones }}
@@ -166,7 +171,11 @@ jobs:
 
           docker compose up -d --no-build --wait --wait-timeout 180
 
-          curl -fsS http://localhost:8098/actuator/health | grep -q '"status":"UP"'
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/health.json" \
+            http://localhost:8098/actuator/health
+
+          jq -e '.status == "UP"' "$RUNNER_TEMP/health.json"
 
           FIN=$(date +%s)
           DURACION=$((FIN-INICIO))
@@ -178,11 +187,19 @@ jobs:
 
       - name: Comprobar salud de OrderManager
         run: |
-          curl -fsS http://localhost:8098/actuator/health | grep -q '"status":"UP"'
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/health.json" \
+            http://localhost:8098/actuator/health
+
+          jq -e '.status == "UP"' "$RUNNER_TEMP/health.json"
 
       - name: Comprobar metricas del microservicio
         run: |
-          curl -fsS http://localhost:8098/actuator/prometheus | grep 'jvm_memory_used_bytes' > /dev/null
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/actuator.prom" \
+            http://localhost:8098/actuator/prometheus
+
+          grep -q 'jvm_memory_used_bytes' "$RUNNER_TEMP/actuator.prom"
 
       - name: Comprobar Prometheus
         run: |
@@ -206,24 +223,35 @@ jobs:
 
       - name: Comprobar servidor de metricas CI-CD
         run: |
-          curl -fsS http://localhost:9101/metrics > /tmp/metricas.prom
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/metricas-ci.prom" \
+            http://localhost:9101/metrics
 
-          grep -q '^ci_coverage_instructions_percent ' /tmp/metricas.prom
-          grep -q '^ci_coverage_branches_percent ' /tmp/metricas.prom
-          grep -q '^ci_coverage_lines_percent ' /tmp/metricas.prom
-          grep -q '^ci_deployment_duration_seconds ' /tmp/metricas.prom
+          grep -q '^ci_coverage_instructions_percent ' "$RUNNER_TEMP/metricas-ci.prom"
+          grep -q '^ci_coverage_branches_percent ' "$RUNNER_TEMP/metricas-ci.prom"
+          grep -q '^ci_coverage_lines_percent ' "$RUNNER_TEMP/metricas-ci.prom"
+          grep -q '^ci_deployment_duration_seconds ' "$RUNNER_TEMP/metricas-ci.prom"
 
-          cat /tmp/metricas.prom
+          cmp monitoring/ci/metricas.prom "$RUNNER_TEMP/metricas-ci.prom"
+
+          cat "$RUNNER_TEMP/metricas-ci.prom"
 
       - name: Validar recoleccion de metricas en Prometheus
         run: |
           for intento in $(seq 1 20); do
-            if curl -fsSG http://localhost:9090/api/v1/query \
-              --data-urlencode 'query=up{job=~"order-manager|pipeline-ci"}' | \
-              python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; assert len(r)==2 and all(x["value"][1]=="1" for x in r)'; then
-              echo "Ambas fuentes de metricas estan disponibles"
-              exit 0
+            if curl -fsSG --max-time 10 \
+              -o "$RUNNER_TEMP/prometheus.json" \
+              --data-urlencode 'query=up{job=~"order-manager|pipeline-ci"}' \
+              http://localhost:9090/api/v1/query; then
+
+              if jq -e '.status == "success" and (.data.result | (map(.metric.job) | sort) == ["order-manager", "pipeline-ci"] and all(.[]; .value[1] == "1"))' \
+                "$RUNNER_TEMP/prometheus.json" > /dev/null; then
+
+                echo "Ambas fuentes de metricas estan disponibles"
+                exit 0
+              fi
             fi
+
             sleep 5
           done
 
@@ -243,13 +271,20 @@ jobs:
       - name: Validar recepcion de logs en Loki
         run: |
           for intento in $(seq 1 20); do
-            if curl -fsSG http://localhost:3100/loki/api/v1/query_range \
+            if curl -fsSG --max-time 10 \
+              -o "$RUNNER_TEMP/loki.json" \
               --data-urlencode 'query={service="order-manager"} |= "Recurso no encontrado"' \
-              --data-urlencode 'limit=10' | \
-              python3 -c 'import json,sys; assert json.load(sys.stdin)["data"]["result"]'; then
-              echo "Loki recibio correctamente los logs de OrderManager"
-              exit 0
+              --data-urlencode 'limit=10' \
+              http://localhost:3100/loki/api/v1/query_range; then
+
+              if jq -e '.status == "success" and any(.data.result[]?; .stream.service == "order-manager" and any(.values[]?; .[1] | contains("Recurso no encontrado")))' \
+                "$RUNNER_TEMP/loki.json" > /dev/null; then
+
+                echo "Loki recibio correctamente los logs de OrderManager"
+                exit 0
+              fi
             fi
+
             sleep 5
           done
 
@@ -267,7 +302,12 @@ jobs:
         run: |
           docker compose down
           docker compose up -d --no-build --wait --wait-timeout 180
-          curl -fsS http://localhost:8098/api/orders/1 | grep -q '"customerName":"Cliente CI"'
+
+          curl -fsS --max-time 10 \
+            -o "$RUNNER_TEMP/pedido.json" \
+            http://localhost:8098/api/orders/1
+
+          jq -e '.customerName == "Cliente CI"' "$RUNNER_TEMP/pedido.json"
 
       - name: Publicar metricas del pipeline
         uses: actions/upload-artifact@v4

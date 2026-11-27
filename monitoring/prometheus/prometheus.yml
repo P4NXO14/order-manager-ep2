@@ -7,3 +7,8 @@ scrape_configs:
     metrics_path: '/actuator/prometheus'
     static_configs:
       - targets: ['app:8098']
+
+  - job_name: 'pipeline-ci'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['ci-metrics:9101']

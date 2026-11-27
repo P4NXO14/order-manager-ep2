@@ -116,7 +116,7 @@ jobs:
         run: docker compose config --quiet
 
       - name: Descargar imagenes de servicios
-        run: docker compose pull db prometheus grafana loki alloy
+        run: docker compose pull db prometheus grafana loki alloy ci-metrics
 
       - name: Iniciar contenedores y medir despliegue
         run: |
@@ -141,6 +141,78 @@ jobs:
       - name: Comprobar metricas del microservicio
         run: |
           curl -fsS http://localhost:8098/actuator/prometheus | grep 'jvm_memory_used_bytes' > /dev/null
+
+      - name: Comprobar Prometheus
+        run: |
+          curl -fsS --retry 20 --retry-delay 3 --retry-all-errors \
+            http://localhost:9090/-/ready
+
+      - name: Comprobar Grafana
+        run: |
+          curl -fsS --retry 20 --retry-delay 3 --retry-all-errors \
+            http://localhost:3000/api/health
+
+      - name: Comprobar Loki
+        run: |
+          curl -fsS --retry 20 --retry-delay 3 --retry-all-errors \
+            http://localhost:3100/ready
+
+      - name: Comprobar Alloy
+        run: |
+          curl -fsS --retry 20 --retry-delay 3 --retry-all-errors \
+            http://localhost:12345/-/ready
+
+      - name: Comprobar servidor de metricas CI-CD
+        run: |
+          curl -fsS http://localhost:9101/metrics > /tmp/metricas.prom
+
+          grep -q '^ci_coverage_instructions_percent ' /tmp/metricas.prom
+          grep -q '^ci_coverage_branches_percent ' /tmp/metricas.prom
+          grep -q '^ci_coverage_lines_percent ' /tmp/metricas.prom
+          grep -q '^ci_deployment_duration_seconds ' /tmp/metricas.prom
+
+          cat /tmp/metricas.prom
+
+      - name: Validar recoleccion de metricas en Prometheus
+        run: |
+          for intento in $(seq 1 20); do
+            if curl -fsSG http://localhost:9090/api/v1/query \
+              --data-urlencode 'query=up{job=~"order-manager|pipeline-ci"}' | \
+              python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; assert len(r)==2 and all(x["value"][1]=="1" for x in r)'; then
+              echo "Ambas fuentes de metricas estan disponibles"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::Prometheus no esta recolectando todas las metricas"
+          exit 1
+
+      - name: Generar advertencia controlada
+        run: |
+          CODIGO=$(curl -s -o /dev/null -w "%{http_code}" \
+            http://localhost:8098/ruta-inexistente)
+
+          if [ "$CODIGO" != "404" ]; then
+            echo "::error::Se esperaba HTTP 404 y se obtuvo $CODIGO"
+            exit 1
+          fi
+
+      - name: Validar recepcion de logs en Loki
+        run: |
+          for intento in $(seq 1 20); do
+            if curl -fsSG http://localhost:3100/loki/api/v1/query_range \
+              --data-urlencode 'query={service="order-manager"} |= "Recurso no encontrado"' \
+              --data-urlencode 'limit=10' | \
+              python3 -c 'import json,sys; assert json.load(sys.stdin)["data"]["result"]'; then
+              echo "Loki recibio correctamente los logs de OrderManager"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::Loki no recibio los logs esperados"
+          exit 1
 
       - name: Crear pedido de prueba
         run: |

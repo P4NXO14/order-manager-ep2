@@ -2,9 +2,9 @@ name: OrderManager CI-CD
 
 on:
   push:
-    branches: [main]
+    branches: [main, evaluacion-3]
   pull_request:
-    branches: [main]
+    branches: [main, evaluacion-3]
   workflow_dispatch:
 
 permissions:
@@ -33,6 +33,18 @@ jobs:
 
       - name: Verificar reporte JaCoCo
         run: test -f target/site/jacoco/jacoco.xml
+
+      - name: Exportar metricas de cobertura
+        run: |
+          python3 monitoring/ci/exportar_metricas.py \
+            target/site/jacoco/jacoco.xml \
+            monitoring/ci/metricas.prom
+
+      - name: Publicar metricas de cobertura
+        uses: actions/upload-artifact@v4
+        with:
+          name: metricas-cobertura
+          path: monitoring/ci/metricas.prom
 
       - name: Configurar Java 21 para SonarQube
         if: github.event_name != 'pull_request'
@@ -77,12 +89,18 @@ jobs:
   despliegue:
     name: Despliegue simulado con Docker
     needs: pruebas
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/evaluacion-3')
     runs-on: ubuntu-latest
 
     steps:
       - name: Clonar repositorio
         uses: actions/checkout@v4
+
+      - name: Descargar metricas de cobertura
+        uses: actions/download-artifact@v4
+        with:
+          name: metricas-cobertura
+          path: monitoring/ci
 
       - name: Construir imagen Docker
         run: docker build -t order-manager:ep2 .
@@ -91,16 +109,38 @@ jobs:
         run: |
           umask 077
           printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" > .env
+          printf 'GRAFANA_ADMIN_USER=admin\n' >> .env
+          printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
 
       - name: Validar Docker Compose
         run: docker compose config --quiet
 
-      - name: Iniciar contenedores
-        run: docker compose up -d --no-build --wait --wait-timeout 180
+      - name: Descargar imagenes de servicios
+        run: docker compose pull db prometheus grafana loki alloy
+
+      - name: Iniciar contenedores y medir despliegue
+        run: |
+          INICIO=$(date +%s)
+
+          docker compose up -d --no-build --wait --wait-timeout 180
+
+          curl -fsS http://localhost:8098/actuator/health | grep -q '"status":"UP"'
+
+          FIN=$(date +%s)
+          DURACION=$((FIN-INICIO))
+
+          echo "# TYPE ci_deployment_duration_seconds gauge" >> monitoring/ci/metricas.prom
+          echo "ci_deployment_duration_seconds $DURACION" >> monitoring/ci/metricas.prom
+
+          echo "Tiempo de despliegue: $DURACION segundos"
 
       - name: Comprobar salud de OrderManager
         run: |
           curl -fsS http://localhost:8098/actuator/health | grep -q '"status":"UP"'
+
+      - name: Comprobar metricas del microservicio
+        run: |
+          curl -fsS http://localhost:8098/actuator/prometheus | grep 'jvm_memory_used_bytes' > /dev/null
 
       - name: Crear pedido de prueba
         run: |
@@ -114,6 +154,19 @@ jobs:
           docker compose down
           docker compose up -d --no-build --wait --wait-timeout 180
           curl -fsS http://localhost:8098/api/orders/1 | grep -q '"customerName":"Cliente CI"'
+
+      - name: Publicar metricas del pipeline
+        uses: actions/upload-artifact@v4
+        with:
+          name: metricas-pipeline
+          path: monitoring/ci/metricas.prom
+
+      - name: Mostrar resumen de metricas
+        run: |
+          echo "## Metricas del pipeline CI/CD" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat monitoring/ci/metricas.prom >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Mostrar diagnostico de errores
         if: failure()

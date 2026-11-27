@@ -56,9 +56,27 @@ services:
     networks:
       - order_network
 
+  grafana:
+    image: grafana/grafana:12.3.4
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?Configura GRAFANA_ADMIN_USER en .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Configura GRAFANA_ADMIN_PASSWORD en .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - order_network
+
 volumes:
   postgres_data:
   prometheus_data:
+  grafana_data:
 
 networks:
   order_network:
